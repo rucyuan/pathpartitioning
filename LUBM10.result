@@ -1,0 +1,2 @@
+Method Name,Number,Running Time,SD(σ),Max Partition Size,Data Duplication,Merged Vertices Number,Merged Classes Number
+Static Method,#0,151s 596ms,5.590309239677815E-6,6.95%,0.011082105937925439,313096,14
