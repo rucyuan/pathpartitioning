@@ -3,6 +3,8 @@ package edu.sdu.yuan.dynamicpathpartitioning
 class DisjointSet(len: Int) {
   var size: Int = len
   var array: Array[Int] = Array.fill(size)(-1)
+  var newArray: Array[Int] = null
+  
   def union(root1: Int, root2: Int): Unit = {
 		if (root1 == root2) return;
 	    if (array.apply(root2) < array.apply(root1)) {
@@ -13,6 +15,16 @@ class DisjointSet(len: Int) {
 	      array.update(root2, root1);
 	    }
 	  }
+  
+  def backup() {
+    newArray = new Array[Int](array.size)
+    Array.copy(array, 0, newArray, 0, array.size)
+  }
+  
+  def rollback() {
+    Array.copy(newArray, 0, array, 0, array.size)
+  }
+  
   def extendTo(len: Int) = {
     if (len > size) {
       val aug = len - size
