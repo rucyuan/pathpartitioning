@@ -9,7 +9,11 @@ class PathPartitioningPlan(sparkContext: SparkContext, dataFeeder: DataFeeder, p
   val sc = sparkContext
   val feeder = dataFeeder
   val partitionNum = partnum
-  
+  var mergedVerticeNum: Long = 0
+  var mergedClassesNum: Long = 0
+  var mergedClasses: Set[(Int, Double)] = Set[(Int, Double)]()
+  var mergedVertice: Set[(Int, Double)] = Set[(Int, Double)]()
+  var dataMovement: Long = 0
   var triples: RDD[(Int, (Int, Int))] = feeder.getInitialInput(batchNumber)
   .partitionBy(new HashPartitioner(partitionNum)).cache()
   var edges: RDD[(Int, Int)] = triples.map(triple => (triple._1, triple._2._2))
@@ -23,11 +27,13 @@ class PathPartitioningPlan(sparkContext: SparkContext, dataFeeder: DataFeeder, p
   val classes: RDD[(Int, Int)] = feeder.getClasses()
   .partitionBy(vertices.partitioner.get).cache()
   
-  val generator: StartingVertexGenerator = new StartingVertexGenerator(vertices, edges)
-  generator.generateStartingVertex()
+  val generator: StartingVertexGenerator = new StartingVertexGenerator()
+  
+  var vS: RDD[(Int, Set[Int])] = generator.generateStartingVertex(vertices, edges).cache()
 
-  var vS: RDD[(Int, Set[Int])] = generator.getStartingVertex()
-  val merger: PathGroupMerger = new PathGroupMerger(partitionNum, true)
+  val merger: PathGroupMerger = new PathGroupMerger(partitionNum)
+  merger.extendTo(1+vertices.keys.reduce((a, b) => Math.max(a, b)))
+  merger.setStartingNum(vertices.filter(t => t._2).count().toInt)
   var nodePartition: RDD[(Int, Set[Int])] = null
   var result: RDD[(Int, (Int, Int, Int))] = null
   def loadBalance(): Seq[(Int, Int)] = result.mapPartitionsWithIndex(
@@ -55,4 +61,17 @@ object PathPartitioningPlan extends Serializable{
     })
     n3file.saveAsTextFile(outputname)
   }
+  
+  def printN3LocalFiles(ppp: PathPartitioningPlan, feeder: DataFeeder, localname: String)
+  : Unit = {
+    val dict = ppp.sc.broadcast(feeder.getDictionary())
+    val n3file: RDD[String] = ppp.result.map(tuple => {
+      (dict.value.get(tuple._2._1).get + " " + dict.value.get(tuple._2._2).get 
+          + " " + dict.value.get(tuple._2._3).get + " .")
+    })
+    println(localname)
+    n3file.saveAsTextFile(localname)
+  }
+  
+  
 }

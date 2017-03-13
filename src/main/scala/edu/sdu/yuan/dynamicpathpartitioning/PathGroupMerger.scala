@@ -5,118 +5,124 @@ import scala.collection.mutable.PriorityQueue
 import scala.collection.mutable.ListBuffer
 
 class PathGroupMerger(partitionNum: Int) {
-  var startingNum: Int = 0
   var pathgroupSize: Int = 0
   
-  var nodeToStart = Map[Int, Int]()
-  var startToPart = Map[Int, Int]()
-  val startToNode = ListBuffer[Int]()
+  var nodeNum: Int = 0
+  
+  var startingNum: Int = 0
+  
+  var nodePartition: Map[Int, Int] = Map[Int, Int]() 
+  
+  var starting: Array[Boolean] = Array.emptyBooleanArray
   
   val sortedPartitions: PriorityQueue[(Int, Int)] = new PriorityQueue[(Int, Int)]()(Ordering.by((t) => -t._2))
   
-  val ds: DisjointSet = new DisjointSet(startingNum)
+  val ds: DisjointSet = new DisjointSet(nodeNum)
   
-  def merge(sortedList: Seq[(Int, Set[Int])]):Boolean = {
+  def extendTo(newsize: Int): Unit = {
+    if (newsize > nodeNum) {
+      starting ++= Array.fill(newsize - nodeNum)(false)
+      ds.extendTo(newsize)
+      nodeNum = newsize
+    }
+  }
+  
+  def setStartingNum(newnum: Int): Unit = {
+    startingNum = newnum
+    pathgroupSize = Math.ceil(startingNum.toDouble / partitionNum).toInt
+  }
+    
+  def refreshStartingNum(): Unit = {
+    startingNum = starting.count(_ == true)
+    pathgroupSize = Math.ceil(startingNum.toDouble / partitionNum).toInt
+  }
+  
+  def merge(sortedList: Seq[(Int, Set[Int])], incremental: Boolean = false):Boolean = {
     ds.backup()
-
     var successful: Boolean = true
-
+    var changedPart: Map[Int, Int] = Map[Int, Int]()
+    breakable {
+    sortedList.foreach( t => t._2.foreach { x => starting(x) = true })
     sortedList.foreach{ t => {
-      var pg: Set[Int] = Set[Int]()
+      var pathGroupSet: Set[Int] = Set[Int]()
       
-      t._2.foreach { ele:Int => {
-        pg += ds.find(nodeToStart(ele))
+      t._2.foreach { st:Int => {
+        pathGroupSet += ds.find(st)
       }}
       
-      var now: Int = pg.last
-      (pg - now).foreach( ele => {
-          ds.union(now, ds.find(ele))
-          now = ds.find(now)
-          if (ds.getSize(now) > pathgroupSize) {
+      var p: Int = 0
+      if (incremental) {
+        var partitionSizeDis: Array[Int] = Array.fill(partitionNum)(0)
+        pathGroupSet.foreach ( pg => { 
+          val size = ds.getSize(pg) 
+          if (nodePartition.contains(pg) && nodePartition(pg) >= 0)
+            partitionSizeDis(nodePartition(pg)) += size
+          } )
+        p = partitionSizeDis.zipWithIndex.maxBy(_._1)._2
+      }
+        
+      var currentPg: Int = pathGroupSet.last
+      
+      (pathGroupSet - currentPg).foreach( pg => {
+          ds.union(currentPg, pg)
+          currentPg = ds.find(currentPg)
+          if (ds.getSize(currentPg) > pathgroupSize) {
             successful = false
             break
           }
         }
       )
+      
+      if (changedPart.contains(currentPg))
+      changedPart = changedPart.updated(currentPg, p)
+      else changedPart += (currentPg -> p)
       }
     }
+    }
     if (!successful) ds.rollback()
+    else {
+      if (incremental) nodePartition ++= changedPart
+    }
     successful
   }
   
-  def getStartGroup(): Map[Int, Int] = {
-    var startGroup: Map[Int, Int] = Map[Int, Int] ()
-    for (x <- Range(0, startingNum)) {
-      startGroup += 
-        ( startToNode(x) -> startToNode(ds.find(x)) )
+  def assignPartition(): Unit = {
+    for (i <- Range(0, partitionNum)) {
+      sortedPartitions.enqueue((i,0))
     }
-    startGroup
+    val list = ds.getPathGroup().sortBy(t => t._2)(scala.math.Ordering.Int.reverse)
+    list.foreach( t => 
+      if (starting(t._1)) {
+        val (part, size) = sortedPartitions.dequeue()
+        nodePartition += (t._1 -> part)
+        sortedPartitions.enqueue((part,size + t._2))
+      }
+    )
+    fillPartition
+  }
+  
+  def fillPartition(): Unit = {
+    for (i <- Range(0, nodeNum)) if (starting(i)) {
+      if (!nodePartition.contains(i))
+      nodePartition += (i -> nodePartition(ds.find(i)))
+      else nodePartition = nodePartition.updated(i, nodePartition(ds.find(i)))
+    }
   }
   
   def addStartingVertex(x: Int, set: Option[Set[Int]]): Unit = {
-    if (!nodeToStart.contains(x)) {
-      nodeToStart += (x -> startingNum)
+    if (!starting(x)) {
+      ds.array(x) = -1
+      starting.update(x, true)
       if (set.isEmpty || set.get.size > 1)
-      startToPart += (startingNum -> -1)
-      else startToPart += (startingNum -> set.get.last)
-      startingNum += 1
-      startToNode += x
-      ds.extendTo(startingNum)
+      nodePartition += (x -> -1)
+      else nodePartition += (x -> set.get.last)
     }
   }
   
-  def merge(set: Set[Int]): Boolean = {
-    var pg: Set[Int] = Set[Int]()
-    set.foreach { ele: Int => {
-      pg += ds.find(nodeToStart(ele))
-      }}
-    var sum: Int = 0
-    var partsize: Array[Int] = Array.fill(partNum)(0)
-    pg.foreach { x => val size = ds.getSize(x); sum += size; if (startToPart(x) != -1) partsize(startToPart(x)) += size }
-
-    val p: Int = partsize.zipWithIndex.maxBy(_._1)._2
-    if (sum <= maxSize) {
-        var now: Int = pg.last
-        startToPart = startToPart.updated(now, p)
-        (pg - now).foreach( ele => {
-          ds.union(now, ele)
-          startToPart = startToPart.updated(ele, p)
-          now = ds.find(now)
-        })
-        true
-      } else {
-        println(sum, maxSize)
-        false
-      }
+  def getStartGroup(): Map[Int, Int] = {
+    var startGroup: Map[Int, Int] = Map[Int, Int]()
+    for (i <- Range(0, starting.length)) if (starting(i))
+      startGroup += (i -> ds.find(i))
+    startGroup
   }
-  
-  def fillPart(): Unit = {
-    for (x <- Range(0, startNum)) {
-      if (ds.array(x) < 0 && startToPart(x) < 0) {
-        val (p, size) = sortedPartitions.dequeue()
-        startToPart = startToPart.updated(x, p)
-        sortedPartitions.enqueue(p -> (size + ds.getSize(x)))
-      }
-    }
-  }
-  
-  def getPart(x: Int): Int = {
-    val ret = startToPart(ds.find(nodeToStart(x)))
-    ret
-  }
-  
-  def getGroup(x: Int): Int = {
-    startToNode(ds.find(nodeToStart(x)))
-  }
-  
-  def getStartPart(): Map[Int, Int] = {
-    var startPart: Map[Int, Int] = Map[Int, Int] ()
-    for (x <- Range(0, startNum)) {
-      val node = startToNode(x)
-      val part = startToPart(ds.find(x))
-      startPart += (node -> part)
-    }
-    startPart
-  }
-  
 }

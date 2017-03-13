@@ -56,11 +56,11 @@ class DataFeeder(sc: SparkContext, insertionRatio: Double, deletionRatio: Double
     }.collectAsMap().toMap
   }
   def getClasses(): RDD[(Int, Int)] = {
-    val literal = entities.filter(t => t._3 == 1).map( t => (t._1, -1))
+    val literal = entities.filter(t => t._3 == 1).map( t => (t._1, t._1))
     triples.filter(t => t._2._1 == 0).map(t => (t._1, t._2._2)).union(literal)
-    .rightOuterJoin(entities.keyBy(t => t._1)).map(t => {
-      if (t._2._1.isEmpty) (t._1, -2)
-      else (t._1, t._2._1.get)
+    .rightOuterJoin(entities.keyBy(t => t._1)).flatMap(t => {
+      if (t._2._1.isEmpty) Seq()
+      else Seq((t._1, t._2._1.get))
     })
   }
 }

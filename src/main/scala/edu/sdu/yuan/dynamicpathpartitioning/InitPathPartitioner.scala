@@ -13,35 +13,61 @@ object InitPathPartitioner extends Serializable{
 
     val wc = weights.join(ppp.classes).cache()
     
-    val topkList = wc.map(t => (t._2._2, (t._2._1, 1)))
+    val sortedList = wc.map(t => (t._2._2, (t._2._1, 1)))
     .reduceByKey((a, b) => (a._1+b._1, a._2+b._2)).mapValues(t => t._1/t._2)
-    .map(t => if (t._1 < 0) (t._1, Double.MaxValue) else (t._1, t._2))
-    .collect().sortBy(t => t._2).take(8)
+    .join(wc.map(t => (t._2._2, t._1)))
+    .map(t => (t._2._2, (t._2._1, t._1))).join(ppp.vS)
+    .map(t => (t._2._1, (t._1, t._2._2)))
+    .groupByKey().collect().toList.sortWith((a, b) => a._1._1 < b._1._1)
     
-    topkList.foreach(println)
     
-    weights = ppp.sc.parallelize(topkList)
-    .join(wc.map(t => (t._2._2, t._1))).map(t => (t._2._2, t._2._1)).cache()
     
-    val sortedList: List[(Int, (Set[Int], Double))] =  ppp.vS.join(weights).collect()
-    .sortWith((left, right) => left._2._2 < right._2._2).toList
+    sortedList.foreach( t => {
+      if (t._2.size > 1) {
+        val result = ppp.merger.merge(t._2.toSeq)
+        if (result) { 
+          ppp.mergedClasses += ((t._1._2, t._1._1))
+          ppp.mergedClassesNum += 1
+          ppp.mergedVerticeNum += t._2.size
+        }
+        //println(t._1, result)
+      }
+    })
     
-    ppp.nodePartition = ppp.sc.parallelize(ppp.merger.bottomUpMerging(sortedList)).cache()
+    sortedList.foreach( t => {
+      if (t._2.size == 1) {
+        val result = ppp.merger.merge(t._2.toSeq)
+        if (result) {
+          ppp.mergedVertice += ((t._1._2, t._1._1))
+          ppp.mergedVerticeNum += 1
+        }
+      }
+    })
     
-    println(ppp.nodePartition.filter( t=> t._2.size <= 1).count())
+    ppp.merger.assignPartition()
+
+    val nodePartition: Map[Int, Int] = ppp.merger.nodePartition
+    val np = ppp.sc.broadcast(nodePartition)
     
-    ppp.result = ppp.triples.join(ppp.nodePartition)
-    .map{ case (s, ((p, o), set)) => {
-      (o, ((s, set), p))
-    }
-    }.join(ppp.nodePartition).map{ case (o, (((s, setS), p), setO)) => {
-      ((s, setS), (o, setO), p)
-    }
-    }
-    .flatMap{ case ((s, setS), (o, setO), p) => {
-      setS.intersect(setO).toSeq.map { ele => (ele, (s, p, o)) }
-    }
-    }.partitionBy(new HashPartitioner(ppp.partitionNum))
+    ppp.nodePartition = ppp.vS.mapValues(set => {
+      set.map { st => np.value.get(st).get }
+    }).partitionBy(ppp.vS.partitioner.get).cache()
     
+    /*val t0 = System.nanoTime()
+    ppp.vS.mapValues(set => {
+      set.seq.map { st => np.value.get(st).get }.groupBy(t => t)
+      .map(t => (t._1, t._2.size)).toSet
+    }).count()
+    val t1 = System.nanoTime()
+    ppp.vS.mapValues(set => {
+      set.map { st => np.value.get(st).get }.toSet
+    }).count()
+    val t2 = System.nanoTime()
+    println((t1-t0)/1e9.toLong, (t2-t1)/1e9.toLong)
+    */
+    ppp.result = ppp.triples.join(ppp.vS)
+    .flatMap( t => t._2._2.map { p => (np.value.get(p).get, (t._1, t._2._1._1, t._2._1._2)) }.toSeq)
+    .partitionBy(new HashPartitioner(ppp.partitionNum)).cache()
+    ppp.dataMovement = ppp.result.count()
   }
 }

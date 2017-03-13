@@ -57,20 +57,21 @@ object PathPartApp{
     val sigma: Double = options.get('sigma).getOrElse(0).asInstanceOf[Double]
     val iterNum: Int = options.get('iter).getOrElse(5).asInstanceOf[Int]
     val pw = new PrintWriter(new BufferedWriter(new FileWriter(foldername.split("/").last+".result")))
-    pw.write("Method Name,Number,Running Time,SD(σ),Max Partition Size,Data Duplication,Merged Vertices Number,Merged Classes Number\n")
+    pw.write("Method Name,Number,Running Time,SD(σ),Max Partition Size,Data Duplication,Merged Vertices Number,Merged Classes Number,Triples Movement Number\n")
     Logger.getLogger("org").setLevel(Level.OFF)
     Logger.getLogger("akka").setLevel(Level.OFF)
     
     val conf = new SparkConf().setAppName("PathPartitioning").setMaster("local[4]")
     val sc = new SparkContext(conf)
     val feeder: DataFeeder = new DataFeeder(sc, insertionRatio, deletionRatio, evolutionTime, foldername+"/input", foldername+"/dict")
+    val outputname: String = "file:///home/yuan/Path/"+foldername.split("/").last
 
     val t0 = System.nanoTime()
     val ppp = new PathPartitioningPlan(sc, feeder, partitionNum)
     InitPathPartitioner.initializePPP(ppp, alpha, iterNum)
     val t1 = System.nanoTime()
     printStatistics(pw, -1, "Static Method", ppp, (t1-t0)/1e6.toLong)
-    //PathPartitioningPlan.printN3Files(ppp, feeder, foldername+"/output")
+    PathPartitioningPlan.printN3LocalFiles(ppp, feeder, outputname+"/init")
     for (iteration <- Range(0, evolutionTime)) {
       val t0 = System.nanoTime()
       IncPathPartitioner.maintainPPP(ppp, feeder)
@@ -93,15 +94,17 @@ object PathPartApp{
       val loadBalance = ppp.loadBalance().map(t => t._2)
       val sum = loadBalance.sum
       val count = loadBalance.size
-      val normalized = loadBalance.map { x => x.toDouble/sum }
-      val mean = 1.0 / count
+      val min = loadBalance.min
+      val max = loadBalance.max
+      val normalized = loadBalance.map { x => (x - min).toDouble / (max - min).toDouble }
+      val mean = normalized.sum / count
       val devs = normalized.map { x => (x - mean) * (x - mean) }
       val sd = devs.sum / count
       val total = ppp.triples.count()
-      val merged = ppp.mergedSetSize()
-      pw.print(methodName+",#"+(iteration+1)+","+time/1e3.toLong+"s "+time%1e3.toLong+"ms,"+sd+","
-          +(normalized.max*10000).toLong.toDouble/100+"%,"
-          +(sum-total).toDouble/total+","+merged._1+","+merged._2+"\n")
+      val merged = (ppp.mergedVerticeNum, ppp.mergedClassesNum)
+      pw.print(methodName+",#"+(iteration+1)+","+time/6e4.toLong+"min"+time/1e3.toLong%60+"s"+time%1e3.toLong+"ms,"+sd+","
+          +(max.toDouble/sum*10000).toLong.toDouble/100+"%,"
+          +(sum-total).toDouble/total+","+merged._1+","+merged._2+","+ppp.dataMovement+"\n")
       pw.flush()
   }
 }

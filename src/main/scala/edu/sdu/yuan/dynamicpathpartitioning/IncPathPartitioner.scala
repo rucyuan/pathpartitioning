@@ -91,47 +91,142 @@ object IncPathPartitioner extends Serializable{
   def maintainPPP(ppp: PathPartitioningPlan, feeder: DataFeeder): Unit = {
     val dtriples: RDD[(Boolean, (Int, Int, Int))] = feeder.getNextDeltaInput().cache()
     val dedges: RDD[(Boolean, (Int, Int))] = dtriples.map(triple => (triple._1, (triple._2._1, triple._2._3))).cache()
+    
     ppp.edges = ppp.edges
     .subtract(dedges.filter{ case (flag, (_, _)) => !flag}.map{ case (flag, (s, o)) => (s, o)})
-    .union(dedges.filter{ case (flag, (_, _)) => flag}.map{ case (flag, (s, o)) => (s, o)}).cache()
+    .union(dedges.filter{ case (flag, (_, _)) => flag}.map{ case (flag, (s, o)) => (s, o)})
+    .partitionBy(ppp.edges.partitioner.get).cache()
+    
+    ppp.vertices = ppp.edges.flatMap{
+      case (from, to) => Seq((to, false), (from, true))
+    }.reduceByKey{case (a, b) => a && b}
+  .partitionBy(ppp.edges.partitioner.get).cache()
 
     ppp.vS = ppp.generator.maintainStartingVertex(ppp.edges, dedges).cache()
-
-    val deltaStart = ppp.vS.flatMap(t => t._2.toSeq).distinct().cache()
     
-    val deltaStartPartition = deltaStart.map { t => (t, true) }.join(ppp.nodePartition)
-    .map(t => (t._1, t._2._2)).collectAsMap().toMap
-    deltaStart.collect().foreach { x => ppp.merger.addStartingVertex(x, deltaStartPartition.get(x)) }
-    val mergedClass = ppp.classes
-    .join(ppp.nodePartition.map{ case (nid, set) => (nid, set.size <= 1)})
-    .map{ case (_, (classno, merged)) => (classno, merged) }
-    .reduceByKey((a, b) => a && b).cache()
+    ppp.merger.extendTo(ppp.generator.startVertice.max+1)
+    
+    val np = ppp.nodePartition.collect().toMap
+    ppp.generator.startVertice.foreach(st => ppp.merger.addStartingVertex(st, np.get(st)))
+    
+    ppp.merger.refreshStartingNum()
+    
     val startGroup = ppp.sc.broadcast(ppp.merger.getStartGroup())
     
-    val maintainence: RDD[(Int, Set[Int])] = dedges.filter{ case (flag, (_, _)) => flag}.map{ case (_, (s, o)) => (o, true)}
-      .distinct().join(ppp.vS).map{ case (nid, (_, src)) => {
-        val groupset = scala.collection.mutable.Set[Int]()
+    val maintainence: RDD[(Int, Set[Int])] = dedges.filter(t => t._1)
+    .map(t => (t._2._2, true)).distinct().join(ppp.vS)
+    .map{ case (nid, (_, src)) => {
+        var groupset: Set[Int] = Set[Int]()
         src.foreach { x => 
-        if (!startGroup.value.contains(x)) { groupset.add((x)) }
-        else 
-        { 
-          groupset.add((startGroup.value.get(x).get))
+          if (!startGroup.value.contains(x)) groupset += x
+          else groupset += startGroup.value.get(x).get
         }
-        }
-        (nid, groupset.toSet)
+        (nid, groupset)
       } }
-    val classSeq = maintainence.join(ppp.classes).map{ case (nid, (set, classno)) => (classno, (nid, set))}
-    .join(mergedClass).collect().toSeq
-
-    val mergeResult = ppp.sc.parallelize(classSeq.filter(p => p._2._1._2.size > 1 && p._2._2).map{
-        case (classno, ((nid, set), _)) => {
-          val mergeSucceed = ppp.merger.merge(set)
-          if (!mergeSucceed) println(classno, set)
-          (classno, mergeSucceed)
-        }}).distinct().filter(t => !t._2).rightOuterJoin(mergedClass).mapValues(t => t._1.isEmpty && t._2)
-    mergeResult.collect().foreach(println)
-    ppp.merger.fillPart()
+    val classesList =  ppp.sc.parallelize(ppp.mergedClasses.toSeq).join(ppp.classes.map(t => (t._2, t._1)))
+    .map(t => (t._2._2, (t._1, t._2._1))).join(ppp.vS).map(t => (t._2._1, (t._1, t._2._2)))
+    .groupByKey().collect().toList.sortBy(t => t._1._2)
     
+    val verticeList = ppp.sc.parallelize(ppp.mergedVertice.toSeq).join(ppp.vS).collect()
+    .toList.sortBy(t => t._2._1)
+    
+    println("Old:", ppp.mergedClasses.size, ppp.mergedVertice.size)    
+    
+    classesList.foreach( t => {
+        val result = ppp.merger.merge(t._2.toSeq, true)
+        if (!result) { 
+          ppp.mergedClassesNum -= 1
+          ppp.mergedClasses -= (t._1)
+          ppp.mergedVerticeNum -= t._2.size
+        }
+    })
+    
+    verticeList.foreach( t => {
+        val result = ppp.merger.merge(Seq((t._1, t._2._2)), true)
+        if (!result) { 
+          ppp.mergedVerticeNum -= 1
+          ppp.mergedVertice -= ((t._1, t._2._1))
+        }
+    })
+    
+    println("New:", ppp.mergedClasses.size, ppp.mergedVertice.size)
+    
+    ppp.merger.fillPartition()
+    
+    val nodePartition = ppp.sc.broadcast(ppp.merger.nodePartition)
+    
+    val newNodePartition = ppp.vS.mapValues(set => {
+      set.map { st => nodePartition.value.get(st).get }
+    }).partitionBy(ppp.vS.partitioner.get).cache()
+    
+    val delta1 = newNodePartition.fullOuterJoin(ppp.nodePartition)
+    .mapValues(t => t._1.getOrElse(Set[Int]()).diff(t._2.getOrElse(Set[Int]())))
+    .filter(t => t._2.size > 0).join(ppp.triples)
+    .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
+    .partitionBy(ppp.result.partitioner.get)
+    //delta1.collect().foreach(println)
+    //println("====================================")
+    val delta2 = newNodePartition.fullOuterJoin(ppp.nodePartition)
+    .mapValues(t => t._2.getOrElse(Set[Int]()).diff(t._1.getOrElse(Set[Int]())))
+    .filter(t => t._2.size > 0).join(ppp.triples)
+    .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
+    .partitionBy(ppp.result.partitioner.get)
+    //delta2.collect().foreach(println)
+    //println("====================================")
+    val delta3 = newNodePartition.join(dtriples.filter(t => t._1)
+        .map(t => (t._2._1, (t._2._2, t._2._3))))
+    .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
+    .partitionBy(ppp.result.partitioner.get)
+    //delta3.collect().foreach(println)
+    //println("====================================")
+    val delta4 = ppp.nodePartition.join(dtriples.filter(t => !t._1)
+        .map(t => (t._2._1, (t._2._2, t._2._3))))
+    .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
+    .partitionBy(ppp.result.partitioner.get)
+    delta4.collect().foreach(println)
+    
+    ppp.dataMovement = delta1.count()+delta2.count()+delta3.count()+delta4.count()
+    
+    ppp.result = ppp.result.union(delta1).subtract(delta2).union(delta3)
+    .subtract(delta4).partitionBy(ppp.result.partitioner.get).cache()
+    
+    ppp.triples = ppp.triples.union(dtriples.filter(t => t._1).map(t => (t._2._1, (t._2._2, t._2._3))))
+    .subtract(dtriples.filter(t => !t._1).map(t => (t._2._1, (t._2._2, t._2._3)))).cache()
+   
+    ppp.nodePartition = newNodePartition
+    
+    
+    /*
+    val nodePartition = ppp.sc.broadcast(ppp.merger.nodePartition)
+    
+    val result: RDD[(Int, Set[(Int, Int)])] = 
+    dedges.filter(t => t._1).map(t => (t._2._2, true))
+    .distinct().join(ppp.vS).map( t => 
+      (t._1, 
+          t._2._2.seq.map( x => nodePartition.value.get(x).get).groupBy(t => t)
+          .map(t => (t._1, t._2.size)).toSet
+      )
+    ).union(ppp.sc.parallelize(ppp.generator.startVertice
+        .map(st => (st, Set((ppp.merger.nodePartition(st), 1)))).toSeq)).cache()
+  
+    ppp.nodePartition.join(result).map(t => (t._1, 
+        {
+          val map = t._2._2.toMap
+          t._2._1.map(t => (t._1, -t._2+map.getOrElse(t._1, 0)))
+          .filter(t => t._2 != 0)
+        })).filter(t => t._2.size > 0)
+        .collect().foreach(println)
+    
+    ppp.nodePartition.rightOuterJoin(result).map(t => (t._1,
+        {
+          val map = t._2._1.getOrElse(Set[(Int, Int)]()).toMap
+          t._2._2.map(t => (t._1, t._2-map.getOrElse(t._1, 0)))
+          .filter(t => t._2 != 0)
+        })).filter(t => t._2.size > 0).collect().foreach(println)
+    
+    //result.collect().foreach(println)
+*/
+    /*
     val result: RDD[(Int, Set[Int])] = 
       ppp.sc.parallelize(classSeq.flatMap{ case (_, ((nid, set), _)) => {
          set.map(x => {
@@ -199,6 +294,6 @@ object IncPathPartitioner extends Serializable{
    .subtract(dtriples.filter(t => !t._1).map(t => (t._2._1, (t._2._2, t._2._3)))).cache()
 
    ppp.nodePartition = ppp.vS.mapValues(set => set.map(x => startPart.value.get(x).get)).cache()
-
+*/
   }
 }
