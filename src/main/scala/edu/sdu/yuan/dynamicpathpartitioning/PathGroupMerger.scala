@@ -13,6 +13,8 @@ class PathGroupMerger(partitionNum: Int) {
   
   var nodePartition: Map[Int, Int] = Map[Int, Int]() 
   
+  var changedPart: Map[Int, Int] = Map[Int, Int]()
+  
   var starting: Array[Boolean] = Array.emptyBooleanArray
   
   val sortedPartitions: PriorityQueue[(Int, Int)] = new PriorityQueue[(Int, Int)]()(Ordering.by((t) => -t._2))
@@ -37,16 +39,31 @@ class PathGroupMerger(partitionNum: Int) {
     pathgroupSize = Math.ceil(startingNum.toDouble / partitionNum).toInt
   }
   
-  def merge(sortedList: Seq[(Int, Set[Int])], incremental: Boolean = false):Boolean = {
+  def backup():Unit = {
     ds.backup()
+    changedPart = Map[Int, Int]()
+  }
+  
+  def rollback():Unit = {
+    ds.rollback()
+  }
+  
+  def changePart(): Unit = {
+    nodePartition ++= changedPart
+  }
+  
+  def setStartingVertex(set: Set[Int]):Unit = {
+    set.foreach { x => starting(x) = true }
+  }
+  
+  def merge(set: Set[Int], incremental: Boolean = false):Boolean = {
     var successful: Boolean = true
-    var changedPart: Map[Int, Int] = Map[Int, Int]()
+    
     breakable {
-    sortedList.foreach( t => t._2.foreach { x => starting(x) = true })
-    sortedList.foreach{ t => {
+      setStartingVertex(set)
       var pathGroupSet: Set[Int] = Set[Int]()
       
-      t._2.foreach { st:Int => {
+      set.foreach { st:Int => {
         pathGroupSet += ds.find(st)
       }}
       
@@ -76,13 +93,8 @@ class PathGroupMerger(partitionNum: Int) {
       if (changedPart.contains(currentPg))
       changedPart = changedPart.updated(currentPg, p)
       else changedPart += (currentPg -> p)
-      }
-    }
     }
     if (!successful) ds.rollback()
-    else {
-      if (incremental) nodePartition ++= changedPart
-    }
     successful
   }
   

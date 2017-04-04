@@ -3,6 +3,7 @@ package edu.sdu.yuan.dynamicpathpartitioning
 import org.apache.spark._
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
+import org.apache.spark.storage._
 import scala.util.control.Breaks._
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
@@ -89,25 +90,31 @@ import org.apache.log4j.Level
 
 object IncPathPartitioner extends Serializable{
   def maintainPPP(ppp: PathPartitioningPlan, feeder: DataFeeder): Unit = {
-    val dtriples: RDD[(Boolean, (Int, Int, Int))] = feeder.getNextDeltaInput().cache()
-    val dedges: RDD[(Boolean, (Int, Int))] = dtriples.map(triple => (triple._1, (triple._2._1, triple._2._3))).cache()
+    val dtriples: RDD[(Boolean, (Int, Int, Int))] = feeder.getNextDeltaInput()
+    .partitionBy(ppp.triples.partitioner.get).cache()
+    val dedges: RDD[(Boolean, (Int, Int))] = dtriples.map(triple => (triple._1, (triple._2._1, triple._2._3)))
+    .filter(t => t._2._1 != 0 && t._2._2 != 37)
+    .partitionBy(dtriples.partitioner.get).cache()
     
     ppp.edges = ppp.edges
     .subtract(dedges.filter{ case (flag, (_, _)) => !flag}.map{ case (flag, (s, o)) => (s, o)})
+    .partitionBy(ppp.edges.partitioner.get)
     .union(dedges.filter{ case (flag, (_, _)) => flag}.map{ case (flag, (s, o)) => (s, o)})
     .partitionBy(ppp.edges.partitioner.get).cache()
     
-    ppp.vertices = ppp.edges.flatMap{
+    ppp.vertice = ppp.edges.flatMap{
       case (from, to) => Seq((to, false), (from, true))
     }.reduceByKey{case (a, b) => a && b}
   .partitionBy(ppp.edges.partitioner.get).cache()
 
-    ppp.vS = ppp.generator.maintainStartingVertex(ppp.edges, dedges).cache()
-    
-    ppp.merger.extendTo(ppp.generator.startVertice.max+1)
+    //ppp.vS = ppp.generator.maintainStartingVertex(ppp.edges, dedges).cache()
+    ppp.vS = ppp.generator.generateStartingVertex(ppp.vertice, ppp.edges)
+
+
+    //ppp.merger.extendTo(ppp.generator.startVertice.max+1)
     
     val np = ppp.nodePartition.collect().toMap
-    ppp.generator.startVertice.foreach(st => ppp.merger.addStartingVertex(st, np.get(st)))
+    //ppp.generator.startVertice.foreach(st => ppp.merger.addStartingVertex(st, np.get(st)))
     
     ppp.merger.refreshStartingNum()
     
@@ -122,34 +129,59 @@ object IncPathPartitioner extends Serializable{
           else groupset += startGroup.value.get(x).get
         }
         (nid, groupset)
-      } }
-    val classesList =  ppp.sc.parallelize(ppp.mergedClasses.toSeq).join(ppp.classes.map(t => (t._2, t._1)))
-    .map(t => (t._2._2, (t._1, t._2._1))).join(ppp.vS).map(t => (t._2._1, (t._1, t._2._2)))
-    .groupByKey().collect().toList.sortBy(t => t._1._2)
+      } }.partitionBy(dedges.partitioner.get).cache()
+      
+    val classList =  ppp.sc.parallelize(ppp.mergedClasses.toSeq).join(ppp.classes.map(t => (t._2, t._1)))
+    .map(t => (t._2._2, (t._1, t._2._1))).join(maintainence).map(t => (t._2._1, (t._1, t._2._2)))
+    .coalesce(ppp.numCores).sortByKey().persist(StorageLevel.MEMORY_AND_DISK)
     
-    val verticeList = ppp.sc.parallelize(ppp.mergedVertice.toSeq).join(ppp.vS).collect()
-    .toList.sortBy(t => t._2._1)
+    val literalList = ppp.sc.parallelize(ppp.mergedVertice.toSeq).join(maintainence)
+    .coalesce(ppp.numCores).sortByKey().persist(StorageLevel.MEMORY_AND_DISK)
     
-    println("Old:", ppp.mergedClasses.size, ppp.mergedVertice.size)    
+    println("Old", ppp.mergedClasses.size, ppp.mergedVertice.size)    
     
-    classesList.foreach( t => {
-        val result = ppp.merger.merge(t._2.toSeq, true)
-        if (!result) { 
-          ppp.mergedClassesNum -= 1
-          ppp.mergedClasses -= (t._1)
-          ppp.mergedVerticeNum -= t._2.size
+    val classParts = classList.partitions
+    val literalParts = literalList.partitions
+    
+    var last: Int = -1
+    var lw: Double = 0
+    var successful: Boolean = false
+    
+    for (p <- classParts) {
+      val idx = p.index
+      val partRdd = classList.mapPartitionsWithIndex((p, iter) => if (p == idx) iter else Iterator())
+      val data = partRdd.collect.toList
+      data.foreach{ case ((classid, weight), (nid, set)) => {
+        if (last != classid) {
+          println(last, successful)
+          if (!successful) ppp.mergedClasses -= ((last, lw))
+          else ppp.merger.changePart()
+          ppp.merger.backup()
+          last = classid
+          lw = weight
+          successful = true
         }
-    })
+        
+        if (successful) successful = ppp.merger.merge(set, true)
+        else ppp.merger.setStartingVertex(set)
+      }}
+    }
+    println(last, successful)
+    if (!successful) ppp.mergedClasses -= ((last, lw)) else ppp.merger.changePart()
     
-    verticeList.foreach( t => {
-        val result = ppp.merger.merge(Seq((t._1, t._2._2)), true)
-        if (!result) { 
-          ppp.mergedVerticeNum -= 1
-          ppp.mergedVertice -= ((t._1, t._2._1))
-        }
-    })
+    for (p <- literalParts) {
+      val idx = p.index
+      val partRdd = literalList.mapPartitionsWithIndex((p, iter) => if (p == idx) iter else Iterator())
+      val data = partRdd.collect.toList
+      data.foreach{ case (nid, (weight, set)) => {
+        ppp.merger.backup()
+        successful = ppp.merger.merge(set, true)
+        if (!successful) ppp.mergedVertice -= ((nid, weight))
+          else ppp.merger.changePart()
+      }}
+    }    
     
-    println("New:", ppp.mergedClasses.size, ppp.mergedVertice.size)
+    println("New", ppp.mergedClasses.size, ppp.mergedVertice.size)
     
     ppp.merger.fillPartition()
     
@@ -157,44 +189,46 @@ object IncPathPartitioner extends Serializable{
     
     val newNodePartition = ppp.vS.mapValues(set => {
       set.map { st => nodePartition.value.get(st).get }
-    }).partitionBy(ppp.vS.partitioner.get).cache()
+    }).partitionBy(ppp.vS.partitioner.get).persist(StorageLevel.MEMORY_AND_DISK)
     
     val delta1 = newNodePartition.fullOuterJoin(ppp.nodePartition)
     .mapValues(t => t._1.getOrElse(Set[Int]()).diff(t._2.getOrElse(Set[Int]())))
     .filter(t => t._2.size > 0).join(ppp.triples)
     .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
-    .partitionBy(ppp.result.partitioner.get)
+    .partitionBy(ppp.result.partitioner.get).cache()
     //delta1.collect().foreach(println)
     //println("====================================")
     val delta2 = newNodePartition.fullOuterJoin(ppp.nodePartition)
     .mapValues(t => t._2.getOrElse(Set[Int]()).diff(t._1.getOrElse(Set[Int]())))
     .filter(t => t._2.size > 0).join(ppp.triples)
     .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
-    .partitionBy(ppp.result.partitioner.get)
+    .partitionBy(ppp.result.partitioner.get).cache()
     //delta2.collect().foreach(println)
     //println("====================================")
     val delta3 = newNodePartition.join(dtriples.filter(t => t._1)
         .map(t => (t._2._1, (t._2._2, t._2._3))))
     .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
-    .partitionBy(ppp.result.partitioner.get)
+    .partitionBy(ppp.result.partitioner.get).cache()
     //delta3.collect().foreach(println)
     //println("====================================")
     val delta4 = ppp.nodePartition.join(dtriples.filter(t => !t._1)
         .map(t => (t._2._1, (t._2._2, t._2._3))))
     .flatMap(t => t._2._1.map { p => (p, (t._1, t._2._2._1, t._2._2._2)) })
-    .partitionBy(ppp.result.partitioner.get)
-    delta4.collect().foreach(println)
+    .partitionBy(ppp.result.partitioner.get).cache()
+    //delta4.collect().foreach(println)
     
     ppp.dataMovement = delta1.count()+delta2.count()+delta3.count()+delta4.count()
     
     ppp.result = ppp.result.union(delta1).subtract(delta2).union(delta3)
-    .subtract(delta4).partitionBy(ppp.result.partitioner.get).cache()
+    .subtract(delta4).partitionBy(new HashPartitioner(ppp.numExecutors))
+    .persist(StorageLevel.MEMORY_AND_DISK)
     
     ppp.triples = ppp.triples.union(dtriples.filter(t => t._1).map(t => (t._2._1, (t._2._2, t._2._3))))
-    .subtract(dtriples.filter(t => !t._1).map(t => (t._2._1, (t._2._2, t._2._3)))).cache()
+    .subtract(dtriples.filter(t => !t._1).map(t => (t._2._1, (t._2._2, t._2._3))))
+    .partitionBy(ppp.triples.partitioner.get)
+    .persist(StorageLevel.MEMORY_AND_DISK)
    
     ppp.nodePartition = newNodePartition
-    
     
     /*
     val nodePartition = ppp.sc.broadcast(ppp.merger.nodePartition)

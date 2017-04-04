@@ -5,9 +5,11 @@ import org.apache.spark.broadcast._
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
 import scala.util.control.Breaks._
+import java.io._
+import java.util.Date
+import java.text.SimpleDateFormat
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
-import java.io._
 
 object PathPartApp{
   type OptionMap = Map[Symbol, Any]
@@ -45,51 +47,58 @@ object PathPartApp{
       """
     if (args.length == 0) println(usage)
     val arglist = args.toList
-    
-    val options = nextOption(Map(),arglist)
+    //Logger.getLogger("org").setLevel(Level.OFF)
+    //Logger.getLogger("akka").setLevel(Level.OFF)
 
-    val partitionNum: Int = options.get('partnum).getOrElse(4).asInstanceOf[Int]
+    val options = nextOption(Map(),arglist)
+    val partitionNum: Int = options.get('partnum).getOrElse(10).asInstanceOf[Int]
     val foldername: String = options.get('infile).get.asInstanceOf[String]
     val insertionRatio: Double = options.get('ins).getOrElse(0.0).asInstanceOf[Double]
     val deletionRatio: Double = options.get('del).getOrElse(0.0).asInstanceOf[Double]
     val evolutionTime: Int = options.get('evltime).getOrElse(1).asInstanceOf[Int]
     val alpha: Double = options.get('alpha).getOrElse(0.8).asInstanceOf[Double]
-    val sigma: Double = options.get('sigma).getOrElse(0).asInstanceOf[Double]
+    val sigma: Double = options.get('sigma).getOrElse(0.0).asInstanceOf[Double]
     val iterNum: Int = options.get('iter).getOrElse(5).asInstanceOf[Int]
     val pw = new PrintWriter(new BufferedWriter(new FileWriter(foldername.split("/").last+".result")))
     pw.write("Method Name,Number,Running Time,SD(σ),Max Partition Size,Data Duplication,Merged Vertices Number,Merged Classes Number,Triples Movement Number\n")
-    Logger.getLogger("org").setLevel(Level.OFF)
-    Logger.getLogger("akka").setLevel(Level.OFF)
     
-    val conf = new SparkConf().setAppName("PathPartitioning").setMaster("local[4]")
+    val conf = new SparkConf().setAppName("PathPartitioning")
+    //.setMaster("local[4]")
     val sc = new SparkContext(conf)
-    val feeder: DataFeeder = new DataFeeder(sc, insertionRatio, deletionRatio, evolutionTime, foldername+"/input", foldername+"/dict")
-    val outputname: String = "file:///home/yuan/Path/"+foldername.split("/").last
-
-    val t0 = System.nanoTime()
-    val ppp = new PathPartitioningPlan(sc, feeder, partitionNum)
+    val numExecutors = sc.getConf.getInt("spark.executor.instances", 4)
+    val numCores = sc.getConf.getInt("spark.executor.cores", 1) * numExecutors
+    println(numExecutors, numCores)
+    val feeder: DataFeeder = new DataFeeder(sc, insertionRatio, deletionRatio, evolutionTime, foldername+"/input", foldername+"/dict", partitionNum)
+    
+    val df:SimpleDateFormat = new SimpleDateFormat("yyMMddHHmm")
+    val date:String = df.format(System.currentTimeMillis)
+    
+    val outputname: String = "file:///home/yuan/Path/"+foldername.split("/").last+"_"+date
+    
+    //println(outputname)
+    val t0 = System.currentTimeMillis()
+    val ppp = new PathPartitioningPlan(sc, feeder, partitionNum, numExecutors, numCores)
     InitPathPartitioner.initializePPP(ppp, alpha, iterNum)
-    val t1 = System.nanoTime()
-    printStatistics(pw, -1, "Static Method", ppp, (t1-t0)/1e6.toLong)
-    PathPartitioningPlan.printN3LocalFiles(ppp, feeder, outputname+"/init")
+    val t1 = System.currentTimeMillis()
+    printStatistics(pw, -1, "Static Method", ppp, t1-t0)
+    //PathPartitioningPlan.printN3LocalFiles(ppp, feeder, outputname+"/init")
     for (iteration <- Range(0, evolutionTime)) {
-      val t0 = System.nanoTime()
+      val t0 = System.currentTimeMillis()
       IncPathPartitioner.maintainPPP(ppp, feeder)
-      val t1 = System.nanoTime()
+      val t1 = System.currentTimeMillis()
       //PathPartitioningPlan.printN3Files(ppp, feeder, foldername+"/output(inc)"+iteration)
-      printStatistics(pw, iteration, "Incremental Method", ppp, (t1-t0)/1e6.toLong)
+      //PathPartitioningPlan.printN3LocalFiles(ppp, feeder, outputname+"/inc_"+iteration)
+      printStatistics(pw, iteration, "Incremental Method", ppp, t1-t0)
 
-      val t2 = System.nanoTime()
-      val pp = new PathPartitioningPlan(sc, feeder, partitionNum, iteration)
+      val t2 = System.currentTimeMillis()
+      val pp = new PathPartitioningPlan(sc, feeder, partitionNum, numExecutors, numCores, iteration)
       InitPathPartitioner.initializePPP(pp, alpha, iterNum)
-      val t3 = System.nanoTime()      
+      val t3 = System.currentTimeMillis()
       //PathPartitioningPlan.printN3Files(pp, feeder, foldername+"/output(sta)"+iteration)
-      
-      printStatistics(pw, iteration, "Static Method", pp, (t3-t2)/1e6.toLong)
-      
+      //PathPartitioningPlan.printN3LocalFiles(ppp, feeder, outputname+"/sta_"+iteration)
+      printStatistics(pw, iteration, "Static Method", pp, t3-t2)
     }
-    pw.close()
-    }
+  }
   def printStatistics(pw: PrintWriter, iteration: Int, methodName: String, ppp: PathPartitioningPlan, time: Long): Unit = {
       val loadBalance = ppp.loadBalance().map(t => t._2)
       val sum = loadBalance.sum
@@ -101,7 +110,7 @@ object PathPartApp{
       val devs = normalized.map { x => (x - mean) * (x - mean) }
       val sd = devs.sum / count
       val total = ppp.triples.count()
-      val merged = (ppp.mergedVerticeNum, ppp.mergedClassesNum)
+      val merged = (ppp.mergedVertice.size, ppp.mergedClasses.size)
       pw.print(methodName+",#"+(iteration+1)+","+time/6e4.toLong+"min"+time/1e3.toLong%60+"s"+time%1e3.toLong+"ms,"+sd+","
           +(max.toDouble/sum*10000).toLong.toDouble/100+"%,"
           +(sum-total).toDouble/total+","+merged._1+","+merged._2+","+ppp.dataMovement+"\n")
