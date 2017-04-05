@@ -47,11 +47,12 @@ object PathPartApp{
       """
     if (args.length == 0) println(usage)
     val arglist = args.toList
+    
     //Logger.getLogger("org").setLevel(Level.OFF)
     //Logger.getLogger("akka").setLevel(Level.OFF)
-
+    
     val options = nextOption(Map(),arglist)
-    val partitionNum: Int = options.get('partnum).getOrElse(10).asInstanceOf[Int]
+    val numPartitions: Int = options.get('partnum).getOrElse(10).asInstanceOf[Int]
     val foldername: String = options.get('infile).get.asInstanceOf[String]
     val insertionRatio: Double = options.get('ins).getOrElse(0.0).asInstanceOf[Double]
     val deletionRatio: Double = options.get('del).getOrElse(0.0).asInstanceOf[Double]
@@ -67,8 +68,8 @@ object PathPartApp{
     val sc = new SparkContext(conf)
     val numExecutors = sc.getConf.getInt("spark.executor.instances", 4)
     val numCores = sc.getConf.getInt("spark.executor.cores", 1) * numExecutors
-    println(numExecutors, numCores)
-    val feeder: DataFeeder = new DataFeeder(sc, insertionRatio, deletionRatio, evolutionTime, foldername+"/input", foldername+"/dict", partitionNum)
+    
+    val feeder: DataFeeder = new DataFeeder(sc, insertionRatio, deletionRatio, evolutionTime, foldername+"/input", foldername+"/dict", numPartitions)
     
     val df:SimpleDateFormat = new SimpleDateFormat("yyMMddHHmm")
     val date:String = df.format(System.currentTimeMillis)
@@ -77,8 +78,8 @@ object PathPartApp{
     
     //println(outputname)
     val t0 = System.currentTimeMillis()
-    val ppp = new PathPartitioningPlan(sc, feeder, partitionNum, numExecutors, numCores)
-    InitPathPartitioner.initializePPP(ppp, alpha, iterNum)
+    val ppp = new PathPartitioningPlan(sc, feeder, numPartitions, numExecutors, numCores)
+    //InitPathPartitioner.initializePPP(ppp, alpha, iterNum)
     val t1 = System.currentTimeMillis()
     printStatistics(pw, -1, "Static Method", ppp, t1-t0)
     //PathPartitioningPlan.printN3LocalFiles(ppp, feeder, outputname+"/init")
@@ -91,7 +92,7 @@ object PathPartApp{
       printStatistics(pw, iteration, "Incremental Method", ppp, t1-t0)
 
       val t2 = System.currentTimeMillis()
-      val pp = new PathPartitioningPlan(sc, feeder, partitionNum, numExecutors, numCores, iteration)
+      val pp = new PathPartitioningPlan(sc, feeder, numPartitions, numExecutors, numCores, iteration)
       InitPathPartitioner.initializePPP(pp, alpha, iterNum)
       val t3 = System.currentTimeMillis()
       //PathPartitioningPlan.printN3Files(pp, feeder, foldername+"/output(sta)"+iteration)

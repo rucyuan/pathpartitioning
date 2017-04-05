@@ -90,7 +90,7 @@ import org.apache.log4j.Level
 
 object IncPathPartitioner extends Serializable{
   def maintainPPP(ppp: PathPartitioningPlan, feeder: DataFeeder): Unit = {
-    val dtriples: RDD[(Boolean, (Int, Int, Int))] = feeder.getNextDeltaInput()
+    /*val dtriples: RDD[(Boolean, (Int, Int, Int))] = feeder.getNextDeltaInput()
     .partitionBy(ppp.triples.partitioner.get).cache()
     val dedges: RDD[(Boolean, (Int, Int))] = dtriples.map(triple => (triple._1, (triple._2._1, triple._2._3)))
     .filter(t => t._2._1 != 0 && t._2._2 != 37)
@@ -229,7 +229,7 @@ object IncPathPartitioner extends Serializable{
     .persist(StorageLevel.MEMORY_AND_DISK)
    
     ppp.nodePartition = newNodePartition
-    
+    */
     /*
     val nodePartition = ppp.sc.broadcast(ppp.merger.nodePartition)
     

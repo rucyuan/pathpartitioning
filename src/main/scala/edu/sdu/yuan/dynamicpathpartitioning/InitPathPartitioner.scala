@@ -8,8 +8,8 @@ import scala.util.control.Breaks._
 
 object InitPathPartitioner extends Serializable{
   def initializePPP(ppp: PathPartitioningPlan, alpha: Double = 0.8, iterNum: Int = 5): Unit = {
-    var weights: RDD[(Int, Double)] = 
-      VertexWeighting.vertexWeighting(ppp.vertice,
+    /*var weights: RDD[(Int, Double)] = 
+      VertexWeighting.vertexWeighting(ppp.vertices,
           ppp.edges, alpha, iterNum).mapValues{case (w1, w2) => (w1 * w2)}
     .setName("weights")
 
@@ -202,6 +202,6 @@ object InitPathPartitioner extends Serializable{
     .partitionBy(new HashPartitioner(ppp.numExecutors))
     .setName("result").persist(StorageLevel.MEMORY_AND_DISK)
 
-    ppp.dataMovement = ppp.result.count()
+    ppp.dataMovement = ppp.result.count()*/
   }
 }
